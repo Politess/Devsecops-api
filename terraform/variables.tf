@@ -18,5 +18,5 @@ variable "image_uri" {
 variable "github_repo" {
   description = "GitHub repo in org/repo format for OIDC trust policy"
   type        = string
-  default     = "Politess/devsecops-api"
+  default     = "Politess/Devsecops-api"
 }
