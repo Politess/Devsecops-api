@@ -1,0 +1,23 @@
+# Checkov configuration
+# Every skipped check must have a documented reason.
+# Undocumented skips are a red flag in security reviews.
+
+soft-fail: false
+framework:
+  - terraform
+
+skip-check:
+  # CKV_AWS_91: ALB access logging requires an S3 bucket.
+  # Acceptable for a portfolio project — enable this in a real production deployment.
+  - CKV_AWS_91
+
+  # CKV_AWS_150: ALB deletion protection — intentionally off so Terraform can tear down
+  # the full stack cleanly in a demo environment.
+  - CKV_AWS_150
+
+  # CKV2_AWS_28: WAF on ALB — out of scope for this project tier.
+  - CKV2_AWS_28
+
+  # CKV_AWS_103: ALB HTTPS listener — HTTP only for simplicity.
+  # In production: add an ACM certificate and redirect HTTP → HTTPS.
+  - CKV_AWS_103

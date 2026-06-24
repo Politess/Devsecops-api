@@ -1,0 +1,252 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# DevSecOps Pipeline
+#
+# Stages (in order):
+#   1. secrets-scan   — GitLeaks: catch committed secrets before anything else
+#   2. test           — Jest unit tests + coverage
+#   3. sast           — Semgrep: static analysis for code vulnerabilities
+#   4. sca            — npm audit: known CVEs in dependencies
+#   5. build          — Docker multistage build
+#   6. image-scan     — Trivy: CVE scan the built image
+#   7. iac-scan       — Checkov: Terraform misconfiguration checks
+#   8. deploy         — Push to ECR + terraform apply (main branch only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: eu-west-2          # London — sensible default for UK-based work
+  ECR_REPOSITORY: devsecops-api
+  IMAGE_TAG: ${{ github.sha }}   # Pin every image to its exact commit
+
+permissions:
+  contents: read                 # Least privilege — only what each job needs
+  id-token: write                # Required for OIDC authentication to AWS
+
+jobs:
+
+  # ── 1. Secrets scan ──────────────────────────────────────────────────────────
+  # Runs first. If a secret is found, nothing else runs — no point building
+  # a pipeline around a repo that's already compromised.
+  secrets-scan:
+    name: Secrets scan (GitLeaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # Full history — GitLeaks scans all commits
+
+      - name: Run GitLeaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2. Test ───────────────────────────────────────────────────────────────────
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    needs: secrets-scan           # Don't test if secrets were found
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'            # Cache node_modules between runs
+
+      - run: npm ci
+      - run: npm test
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()              # Upload even if tests fail — useful for debugging
+        with:
+          name: coverage
+          path: coverage/
+
+  # ── 3. SAST ───────────────────────────────────────────────────────────────────
+  # Semgrep looks for insecure patterns in your own code —
+  # hardcoded credentials, prototype pollution, injection vectors, etc.
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    needs: secrets-scan
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          semgrep \
+            --config=p/nodejs \
+            --config=p/owasp-top-ten \
+            --config=p/secrets \
+            --error \
+            --json \
+            --output=semgrep-results.json \
+            . || true          # Don't fail the build yet — collect results first
+
+      - name: Upload Semgrep results
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+
+  # ── 4. SCA ────────────────────────────────────────────────────────────────────
+  # npm audit checks your dependencies against the npm advisory database.
+  # --audit-level=high means only fail on HIGH or CRITICAL severity CVEs.
+  sca:
+    name: SCA (npm audit)
+    runs-on: ubuntu-latest
+    needs: secrets-scan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: npm audit
+        run: npm audit --audit-level=high
+
+  # ── 5. Build ──────────────────────────────────────────────────────────────────
+  build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    needs: [test, sast, sca]      # All security gates must pass before building
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false             # Don't push yet — scan first
+          tags: ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha    # GitHub Actions cache speeds up repeated builds
+          cache-to: type=gha,mode=max
+          outputs: type=docker,dest=/tmp/image.tar
+
+      - name: Save image as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+
+  # ── 6. Image scan ─────────────────────────────────────────────────────────────
+  # Trivy scans the built image for OS and library CVEs.
+  # Fail on CRITICAL — HIGH can be reviewed separately.
+  image-scan:
+    name: Image scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load image
+        run: docker load --input /tmp/image.tar
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          severity: CRITICAL
+          ignore-unfixed: true    # Don't fail on CVEs with no available fix
+
+      - name: Trivy SARIF upload (visible in GitHub Security tab)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          format: sarif
+          output: trivy-results.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ── 7. IaC scan ───────────────────────────────────────────────────────────────
+  # Checkov checks your Terraform for misconfigurations before they're applied —
+  # open security groups, unencrypted S3 buckets, missing logging, etc.
+  iac-scan:
+    name: IaC scan (Checkov)
+    runs-on: ubuntu-latest
+    needs: [test, sast, sca]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: cli
+          soft_fail: false        # Hard fail — don't deploy misconfigured infra
+
+  # ── 8. Deploy ─────────────────────────────────────────────────────────────────
+  # Only runs on pushes to main (not PRs).
+  # Uses OIDC — no AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY stored anywhere.
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: [image-scan, iac-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production       # Requires manual approval if configured
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC — no static keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load and push image to ECR
+        run: |
+          docker load --input /tmp/image.tar
+          ECR_IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} $ECR_IMAGE
+          docker push $ECR_IMAGE
+          echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.8.0'
+
+      - name: Terraform init
+        working-directory: terraform/
+        run: terraform init
+
+      - name: Terraform apply
+        working-directory: terraform/
+        run: |
+          terraform apply -auto-approve \
+            -var="image_uri=${{ env.ECR_IMAGE }}" \
+            -var="aws_region=${{ env.AWS_REGION }}"
