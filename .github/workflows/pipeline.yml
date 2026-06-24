@@ -236,18 +236,26 @@ jobs:
           docker push $ECR_IMAGE
           echo "ECR_IMAGE=$ECR_IMAGE" >> $GITHUB_ENV
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: '1.8.0'
-
-      - name: Terraform init
-        working-directory: terraform/
-        run: terraform init
-
-      - name: Terraform apply
-        working-directory: terraform/
+      - name: Deploy new image to ECS
         run: |
-          terraform apply -auto-approve \
-            -var="image_uri=${{ env.ECR_IMAGE }}" \
-            -var="aws_region=${{ env.AWS_REGION }}"
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition devsecops-api \
+            --query 'taskDefinition' --output json)
+
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \
+            --arg IMAGE "$ECR_IMAGE" \
+            '.containerDefinitions[0].image = $IMAGE
+             | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                   .compatibilities, .registeredAt, .registeredBy)')
+
+          echo "$NEW_TASK_DEF" > new-task-def.json
+
+          NEW_REVISION=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+
+          aws ecs update-service \
+            --cluster devsecops-api-cluster \
+            --service devsecops-api-service \
+            --task-definition "$NEW_REVISION" \
+            --force-new-deployment

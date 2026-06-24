@@ -225,7 +225,7 @@ resource "aws_iam_role" "github_actions" {
       Condition = {
         StringLike = {
           # Replace with your actual GitHub org/repo
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:*"
         }
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
@@ -264,9 +264,37 @@ resource "aws_iam_role_policy" "github_actions" {
         Effect = "Allow"
         Action = [
           "ecs:UpdateService",
-          "ecs:DescribeServices"
+          "ecs:DescribeServices",
+          "ecs:DescribeTaskDefinition",
+          "ecs:RegisterTaskDefinition"
         ]
         Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = aws_iam_role.ecs_execution.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::devsecops-api-tfstate",
+          "arn:aws:s3:::devsecops-api-tfstate/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem"
+        ]
+        Resource = "arn:aws:dynamodb:eu-west-2:586199468662:table/devsecops-api-tflock"
       }
     ]
   })
