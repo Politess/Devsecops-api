@@ -27,7 +27,8 @@ env:
 
 permissions:
   contents: read                 # Least privilege — only what each job needs
-  id-token: write                # Required for OIDC authentication to AWS
+  id-token: write
+  security-events: write                # Required for OIDC authentication to AWS
 
 jobs:
 
