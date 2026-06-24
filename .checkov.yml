@@ -7,28 +7,41 @@ framework:
   - terraform
 
 skip-check:
-  # CKV_AWS_91: ALB access logging requires an S3 bucket.
-  # Acceptable for a portfolio project — enable in real production.
-  - CKV_AWS_91
+  # --- HTTPS / TLS (needs a domain + ACM certificate) ---
+  # In production: add an ACM cert and redirect HTTP to HTTPS.
+  - CKV_AWS_103   # ALB HTTPS listener
+  - CKV2_AWS_20   # ALB redirect HTTP to HTTPS
+  - CKV_AWS_378   # target group uses HTTP
+  - CKV_AWS_2     # ALB protocol should be HTTPS
 
-  # CKV_AWS_150: ALB deletion protection — intentionally off so the
-  # demo stack can be torn down cleanly with terraform destroy.
-  - CKV_AWS_150
+  # --- ALB extras (out of scope for demo tier) ---
+  - CKV_AWS_91    # ALB access logging (needs S3 bucket)
+  - CKV_AWS_150   # ALB deletion protection (off for clean teardown)
+  - CKV2_AWS_28   # WAF on ALB
 
-  # CKV2_AWS_28: WAF on ALB — out of scope for this project tier.
-  - CKV2_AWS_28
+  # --- Networking: public-facing by design (no NAT gateway) ---
+  # ECS tasks need public IPs to pull from ECR without a NAT gateway.
+  # Port 80 open and broad egress are intentional for this demo.
+  - CKV_AWS_333   # ECS public IP
+  - CKV_AWS_260   # ingress from 0.0.0.0/0 to port 80
+  - CKV_AWS_382   # egress to 0.0.0.0/0
 
-  # CKV_AWS_103 / CKV2_AWS_20 / CKV_AWS_378: HTTPS on the ALB requires
-  # a domain name + ACM certificate. HTTP-only for simplicity.
-  # In production: add ACM cert and redirect HTTP to HTTPS.
-  - CKV_AWS_103
-  - CKV2_AWS_20
-  - CKV_AWS_378
+  # --- VPC monitoring (extra cost/storage) ---
+  - CKV2_AWS_12   # default security group restriction (default SG unused)
+  - CKV2_AWS_11   # VPC flow logging
 
-  # CKV2_AWS_12: Default security group restriction — the app uses
-  # dedicated security groups (alb, ecs_tasks); the default SG is unused.
-  - CKV2_AWS_12
+  # --- KMS encryption (uses AWS-managed encryption instead) ---
+  # ECR uses AES256; logs use default encryption. KMS adds key
+  # management overhead beyond this project's scope.
+  - CKV_AWS_136   # ECR KMS encryption
+  - CKV_AWS_158   # CloudWatch log group KMS encryption
 
-  # CKV2_AWS_11: VPC flow logging requires extra S3 storage and cost.
-  # Out of scope for a demo; enable for production network monitoring.
-  - CKV2_AWS_11
+  # --- Log retention (30 days is sufficient for a demo) ---
+  - CKV_AWS_338   # CloudWatch logs retained for 1 year
+
+  # --- IAM policy scope ---
+  # The GitHub Actions policy uses "*" only for ecr:GetAuthorizationToken
+  # (which AWS requires to be "*") and ecs:UpdateService. Acceptable for
+  # a demo; in production, scope these to specific resource ARNs.
+  - CKV_AWS_355   # "*" resource for restrictable actions
+  - CKV_AWS_290   # write access without constraints
